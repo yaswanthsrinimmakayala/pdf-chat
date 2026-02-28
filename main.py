@@ -1,5 +1,6 @@
 import os
 import logging
+import tempfile
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -13,25 +14,34 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(m
 st.title("Chat about Transformers")
 st.caption("Ask anything about the Transformer Architecture")
 
-FILE_NAME = "170603762v7.pdf"
+with st.sidebar:
+    uploaded_file = st.file_uploader("Upload a PDF",type="pdf")
+    if uploaded_file is None:
+        st.info("Please upload a file")
+        st.stop()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+        f.write(uploaded_file.read())
+        tmp_path = f.name
+
 EMBED_MODEL = "mxbai-embed-large"
 LLM_MODEL = "llama3.2"
-CHROMA_DB = os.path.join(os.path.dirname(__file__),"chroma_db")
+CHROMA_DB = os.path.join(os.path.dirname(tmp_path),"chroma_db")
 
 @st.cache_resource
-def load_vectorstore():
+def load_vectorstore(pdf_pth):
     embeddings = OllamaEmbeddings(model=EMBED_MODEL)  
     if os.path.exists(CHROMA_DB):
         logging.info("Loaded existing vectorstore")
         return Chroma(persist_directory=CHROMA_DB,embedding_function=embeddings)
     # opening the PDF
-    loader = PyPDFLoader(FILE_NAME)
+    loader = PyPDFLoader(pdf_pth)
     pages = loader.load() # loading the pages
     if pages:
-        logging.info(f"{FILE_NAME} loaded")
+        logging.info(f"{pdf_pth} loaded")
         logging.info(f"{len(pages)} pages lodaed")
     else:
-        logging.info(f"{FILE_NAME} not loaded")
+        logging.info(f"{tmp_path} not loaded")
     splitter = RecursiveCharacterTextSplitter(chunk_size=500,chunk_overlap=50)
     chunks = splitter.split_documents(pages)
     logging.info(f"chunks:{len(chunks)} created")
@@ -74,7 +84,7 @@ def load_chain(_vectorstore):
     return chain
 
 # load resources
-vectorstore  = load_vectorstore()
+vectorstore  = load_vectorstore(tmp_path)
 chain = load_chain(vectorstore)
 if chain:
     logging.info("Chain Loaded")
