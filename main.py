@@ -6,13 +6,14 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_chroma import Chroma
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import PromptTemplate,ChatPromptTemplate,MessagesPlaceholder
+from langchain_core.runnables import RunnablePassthrough,RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage,AIMessage
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
-st.title("Chat about Transformers")
-st.caption("Ask anything about the Transformer Architecture")
+st.title("Chat about your PDF")
+st.caption("Ask anything about the uploaded file")
 
 with st.sidebar:
     uploaded_file = st.file_uploader("Upload a PDF",type="pdf")
@@ -53,30 +54,29 @@ def load_vectorstore(pdf_pth):
 @st.cache_resource
 def load_chain(_vectorstore):
     llm = OllamaLLM(model=LLM_MODEL)
-    prompt = PromptTemplate.from_template("""
-            You are an expert assistant that answers questions strictly based on the provided context.
+    prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are an expert assistant with access to two sources:
 
-            Rules:
-            - Answer ONLY from the context below
-            - Never use outside knowledge
-            - If the answer is not in the context, say exactly: "This information is not found in the document."
-            - Be specific and detailed in your answers
-            - If the question asks about a concept, explain it clearly using the context
-            - Quote directly from the context when relevant
+        1. Document context from the uploaded PDF
+        2. Chat history from our conversation
 
-            Context: {context}
+        Rules:
+        - For questions about document content → use Document Context
+        - For conversational questions (summarize our chat, what did I ask, etc.) → use Chat History
+        - If not found in either → say 'This information is not found.'
 
-            Question: {question}
-
-            Answer:
-            """)
+        Document Context: {context}"""),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}")
+        ])
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
     chain = (
         {
-        "context":_vectorstore.as_retriever(search_kwargs={'k':10})|format_docs,
-        "question":RunnablePassthrough()}
+        "context":RunnableLambda(lambda x:x["question"])| _vectorstore.as_retriever(search_kwargs={'k':10})|format_docs,
+        "question":RunnableLambda(lambda x:x["question"]),
+        "chat_history":RunnableLambda(lambda x:x["chat_history"])}
         | prompt
         | llm
         | StrOutputParser()
@@ -93,22 +93,25 @@ if chain:
 
 if "messages" not in st.session_state:
     st.session_state.messages= []
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
-query = st.chat_input("Ask something about Transformer Architecture...")
+query = st.chat_input("Ask something about upload...")
 if query:
     # show user message
     with st.chat_message("user"):
         st.write(query)
     st.session_state.messages.append({"role":"user","content":query})
+    st.session_state.chat_history.append(HumanMessage(content = query))
 
     # llm response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            answer = chain.invoke(query)
+            answer = chain.invoke({"question":query, "chat_history":st.session_state.get("chat_history",[])})
         st.write(answer)
     st.session_state.messages.append({"role":"assistant","content":answer})
-
+    st.session_state.chat_history.append(AIMessage(content=answer))
