@@ -95,12 +95,14 @@ if "messages" not in st.session_state:
     st.session_state.messages= []
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-
+if "is_generating" not in st.session_state:
+    st.session_state.is_generating=False
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
-query = st.chat_input("Ask something about upload...")
+
+query = st.chat_input("Ask something about upload...", disabled=st.session_state.is_generating)
 if query:
     # show user message
     with st.chat_message("user"):
@@ -110,8 +112,8 @@ if query:
 
     # llm response
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            answer = chain.invoke({"question":query, "chat_history":st.session_state.get("chat_history",[])})
-        st.write(answer)
+        st.session_state.is_generating=True
+        answer = st.write_stream(chain.stream({"question":query, "chat_history":st.session_state.get("chat_history",[])}))
+        st.session_state.is_generating=False
     st.session_state.messages.append({"role":"assistant","content":answer})
     st.session_state.chat_history.append(AIMessage(content=answer))
