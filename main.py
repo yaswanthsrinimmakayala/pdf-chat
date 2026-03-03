@@ -1,4 +1,6 @@
 import os
+import json
+import hashlib
 import logging
 import tempfile
 import streamlit as st
@@ -20,19 +22,19 @@ with st.sidebar:
     if uploaded_file is None:
         st.info("Please upload a file")
         st.stop()
-
+    file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
         f.write(uploaded_file.read())
         tmp_path = f.name
 
 EMBED_MODEL = "mxbai-embed-large"
-LLM_MODEL = "llama3.2"
-CHROMA_DB = os.path.join(os.path.dirname(tmp_path),"chroma_db")
+LLM_MODEL = "llama3.1:8b"
+CHROMA_DB = f"./chroma_db/{file_hash}"
 
 @st.cache_resource
-def load_vectorstore(pdf_pth):
+def load_vectorstore(file_hash,pdf_pth):
     embeddings = OllamaEmbeddings(model=EMBED_MODEL)  
-    if os.path.exists(CHROMA_DB):
+    if os.path.exists(CHROMA_DB) and os.listdir(CHROMA_DB):
         logging.info("Loaded existing vectorstore")
         return Chroma(persist_directory=CHROMA_DB,embedding_function=embeddings)
     # opening the PDF
@@ -43,38 +45,70 @@ def load_vectorstore(pdf_pth):
         logging.info(f"{len(pages)} pages lodaed")
     else:
         logging.info(f"{tmp_path} not loaded")
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500,chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=400,chunk_overlap=50)
     chunks = splitter.split_documents(pages)
     logging.info(f"chunks:{len(chunks)} created")
     
     vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings,persist_directory=CHROMA_DB)
-
+    vectorstore.persist()
     return vectorstore
 
 @st.cache_resource
 def load_chain(_vectorstore):
-    llm = OllamaLLM(model=LLM_MODEL)
+    llm = OllamaLLM(model=LLM_MODEL,temperature=0)
     prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are an expert assistant with access to two sources:
+    ("system", """You are a document-grounded assistant.
 
-        1. Document context from the uploaded PDF
-        2. Chat history from our conversation
+        You have access to:
+        1. Retrieved context from a PDF (with page numbers)
+        2. Chat history (only to understand follow-up questions)
 
-        Rules:
-        - For questions about document content → use Document Context
-        - For conversational questions (summarize our chat, what did I ask, etc.) → use Chat History
-        - If not found in either → say 'This information is not found.'
+        -----------------------
+        STRICT RULES
+        -----------------------
 
-        Document Context: {context}"""),
+        1. Answer ONLY using the provided Document Context.
+        2. If the answer is not explicitly found in the context, respond exactly:
+        "This information is not found."
+
+        3. Every factual statement MUST include a citation.
+        4. Citations MUST use this exact format:
+        [Page X]
+
+        5. If multiple pages support a statement, list them like:
+        [Page 2, Page 5]
+
+        6. Do NOT invent page numbers.
+        7. Do NOT use knowledge outside the document.
+        8. Do NOT mention the chat history unless necessary to resolve a follow-up.
+
+        -----------------------
+        ANSWER FORMAT
+        -----------------------
+
+        - Be concise.
+        - Use short paragraphs.
+        - Place citations immediately after the sentence they support.
+        - Do NOT place citations at the end of the entire answer.
+        - Do NOT include a references section.
+
+        -----------------------
+        Document Context:
+        {context}
+        """),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{question}")
         ])
     def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+        results = []
+        for doc in docs:
+            page = doc.metadata.get('page','unknown')
+            results.append(f"[Page {page}] \n {doc.page_content}")
+        return "\n\n".join(results)
 
     chain = (
         {
-        "context":RunnableLambda(lambda x:x["question"])| _vectorstore.as_retriever(search_kwargs={'k':10})|format_docs,
+        "context":RunnableLambda(lambda x:x["question"])| _vectorstore.as_retriever( search_type="mmr",search_kwargs={'k':5})|format_docs,
         "question":RunnableLambda(lambda x:x["question"]),
         "chat_history":RunnableLambda(lambda x:x["chat_history"])}
         | prompt
@@ -84,7 +118,7 @@ def load_chain(_vectorstore):
     return chain
 
 # load resources
-vectorstore  = load_vectorstore(tmp_path)
+vectorstore  = load_vectorstore(file_hash,tmp_path)
 chain = load_chain(vectorstore)
 if chain:
     logging.info("Chain Loaded")
@@ -101,7 +135,9 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
-
+if st.sidebar.button("Clear Chat"):
+    st.session_state.messages = []
+    st.session_state.chat_history = []
 query = st.chat_input("Ask something about upload...", disabled=st.session_state.is_generating)
 if query:
     # show user message
@@ -109,11 +145,14 @@ if query:
         st.write(query)
     st.session_state.messages.append({"role":"user","content":query})
     st.session_state.chat_history.append(HumanMessage(content = query))
-
+    answer = ""
     # llm response
     with st.chat_message("assistant"):
         st.session_state.is_generating=True
-        answer = st.write_stream(chain.stream({"question":query, "chat_history":st.session_state.get("chat_history",[])}))
+        message_placeholder = st.empty() 
+        for chunk in chain.stream({"question":query, "chat_history":st.session_state.get("chat_history",[])}):
+            answer+=chunk
+            message_placeholder.markdown(answer) 
         st.session_state.is_generating=False
     st.session_state.messages.append({"role":"assistant","content":answer})
     st.session_state.chat_history.append(AIMessage(content=answer))
